@@ -39,6 +39,10 @@ LOG_FILE="${LOGS_DIR}/mongodb-backup_${DATE}.log"
 # Default is normal. Requires values : fast (-1), normal (-5) or best (-9)
 COMPRESS_LVL="normal"
 
+## Display all errors on stdout
+## Default is false
+DISPLAY_ERRORS=true
+
 ## Define Mongos host. If you don't use default port, add port number after hostname (e.g "localhost:27019")
 ## Default is "localhost"
 ## if you need to use remote mongos, add mongos port after hostname (e.g. mongos-01:27017)
@@ -92,7 +96,9 @@ function usage() {
 
 function log {
 	echo -e "$(date +%D" "%T) $1" >> $LOG_FILE
-	#echo $1
+	if [ "$DISPLAY_ERRORS" ] ; then
+	       echo $1	
+	fi       
 }
 
 function check_running {
@@ -177,7 +183,7 @@ function do_tarball {
 	i=0
 	for DIR in ${DIRECTORIES[@]} ; do
 		if [ -d "$DIR" ] ; then
-			FILES[$i]=$(tar -czf - $DIR | gzip -f ${COMPRESS_LVL} - > ${DIR}_${DATE}.tar.gz)
+			FILES[$i]=$(tar -cf - $DIR | gzip ${COMPRESS_LVL} - > ${DIR}_${DATE}.tar.gz)
 			rm -fr ${DIR}/ &> /dev/null
 		else
 			log "Error : ${DIR} doesn't exist."
