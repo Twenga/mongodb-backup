@@ -185,7 +185,7 @@ function do_tarball {
 		fi
 		let i++
 	done
-	NB_FILES=${#FILES[@]} 
+	NB_FILE=${#FILES[@]} 
 	check_retention
 }
 
