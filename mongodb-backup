@@ -180,21 +180,43 @@ function do_tarball {
 		let i++
 	done
 	NB_FILE=${#FILES[@]} 
+
+	# log archive
+	cd $BACKUP_DIR/logs
+	nbLogNotCompressed=$(find . -name "*.log" -type f -mtime +0 | wc -l)
+	if [ "$nbLogNotCompressed" != "0" ] ; then 
+		for logFile in $(find . -name "*.log" -type f -mtime +0) ; do
+			tar -czf $logFile.tar.gz $logFile --remove-files
+		done
+	fi
+
 	check_retention
 }
 
-function check_retention {
-	if [ $MAX_BACKUP_RETENTION -gt 0 ] ; then
-    		log "Checking retention of backups..."
-    		toDelete=$(find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION)
-      		if [ ! -z "$toDelete" ] ; then
-        		log "Deleting files older than ${MAX_BACKUP_RETENTION} days:"
-			log "$(find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION -exec du -hs {} \;)" 
-       			find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION -delete
-      		fi
+function retention {
+	sType=$1
+	sDir=$2
+
+	eval "echo \$SHARD${i}_NAME"
+	if [ "$(eval "echo \$MAX_${sType^^}_RETENTION")" -gt 0 ] ; then
+		log "Checking $sType retention..."
+		toDelete=$(find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION"))
+		if [ ! -z "$toDelete" ] ; then
+			log "Deleting files older than $(eval "echo \$MAX_${sType^^}_RETENTION") days:"
+			log "$(find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -exec du -hs {} \;)" 
+			find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -delete
+		fi
 	else
-		log "Info : Retention is disable."
+		log "Info : ${sType^} retention is disable."
 	fi
+}
+
+function check_retention {
+	# Check backup retention
+	retention backup $BACKUP_DIR
+
+	# Check logs retention
+	retention log $BACKUP_DIR/logs
 }
 
 function send_mail {
