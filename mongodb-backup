@@ -35,6 +35,12 @@ DUMP_OPTIONS=""
 OPTIONS=""
 NB_ERRORS=0
 NB_FILE=0
+COUNT_PROC=0
+declare -a PIDS
+declare -A PROCINFO
+
+## Activate job monitoring
+set -o monitor
 
 ## Check if mongo binary is present
 which mongo &> /dev/null ; isInstalled=$?
@@ -89,7 +95,6 @@ function check_running {
 			rm -f $PID_FILE
 		fi
 	fi
-	
 	return 1
 }
 
@@ -107,6 +112,7 @@ function pickup_secondary {
 function prepare_job {
 	log "Preparing mongodb backup job..."
 
+	# Compression level selection
 	case "${COMPRESS_LVL}" in
 		fast)   log "Info : Fast comppression was chosen"
 			COMPRESS_LVL="-1"
@@ -168,7 +174,8 @@ function finish_up {
 function do_tarball {
 	log "Starting compression..."
 	cd $BACKUP_DIR
-	i=0
+	local i=0
+
 	for DIR in ${DIRECTORIES[@]} ; do
 		if [ -d "$DIR" ] ; then
 			FILES[$i]=$(tar -cf - $DIR | gzip ${COMPRESS_LVL} - > ${DIR}_${DATE}.tar.gz)
@@ -281,10 +288,81 @@ function get_balancer_state {
 	mongo $MONGOS_OPT admin --eval "sh.getBalancerState()" | tail -1 
 }
 
+function findInArray {
+	local sReturnType=$1 sSearch=$2
+	[[ "$sReturnType" != "pid" ]] && sSearchType="pid" || sSearchType="name" 
+	for (( i=0; i<$(( ${#PROCINFO[@]}/2 )); i++ )) ; do
+		if [ ${PROCINFO[$i,$sSearchType]} == $sSearch ] ; then
+			echo ${PROCINFO[$i,$sReturnType]}
+			return 0
+		fi
+	done
+	return 1
+}
+
+# this allow to handle timeout
+function timedWait {
+	sleep $BACKUP_TIMEOUT &
+	iSleepPid=$!
+	wait $! >/dev/null 2>&1
+}
+
+# this function send SIGTERM to remaining childs
+function killAllChilds {
+	for iPid in "$@"; do
+		shift
+		log "send SIGTERM to $iPid"
+		kill -0 $iPid 2>/dev/null && kill $iPid
+	done
+}
+
+# need to pass list of child pids
+function waitChildProcess {
+	# Wait for children to exit and indicate whether all exited with 0 status.
+	# start the infinite loop
+	while :; do
+		for iPid in "$@"; do
+			shift
+			sName=$(findInArray name $iPid) 
+
+			# test if still present
+			if kill -0 "$iPid" 2>/dev/null; then
+				# still present, remove the pid from pid list
+				set -- "$@" "$iPid"
+			# use wait to get back the return code of the child
+			elif wait "$iPid" 2>/dev/null; then
+				log "Info: $sName backup completed"
+				let COUNT_PROC--
+			else
+				log "Error: $sName backup failed"
+				(( NB_ERRORS++, COUNT_PROC--))
+			fi
+		done
+
+		# exit when no child remains
+		(("$#" > 0)) || break
+
+		timedWait
+		if [ $? -eq 0 ]; then
+			# timeout reached
+			log "timeout, killing remaining child"
+			killAllChilds $@
+		fi
+	done
+}
+
+# this is called when a child exits
+# this will kill the sleep process in the main waiting loop
+function childExit {
+	kill -0 $iSleepPid 2>/dev/null && kill $iSleepPid
+}
+
+
 ###########################################################################
 #                              Options checks                             #
 ###########################################################################
 
+## Get options
 while getopts ":hjerm:c:u:p:" opt ; do
         case "$opt" in
 		h) usage >&2 ; exit 0;;
@@ -325,6 +403,10 @@ if [ "$COMPRESS_LVL" != "normal" ] && [ "$COMPRESS_LVL" != "fast" ] && [ "$COMPR
 	exit 1
 fi
 
+# this allow to send signal SIGCHLD on child crash/exit
+trap "childExit" CHLD
+# Kill all child process if ctrl-c
+trap "killAllChilds $PIDS" SIGINT SIGTERM
 
 ###########################################################################
 #                                   BEGIN                                 #
@@ -349,32 +431,43 @@ else
 	log "MongoDB backup start at $(date +%H:%M:%S)"
 	prepare_job
 	stop_balancer
+
 	log "Starting backups..."
-	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null ; CFG_RETURN=$?	
-	DIRECTORIES[0]="config" 
-	if [ "$CFG_RETURN" -ne "0" ] ; then
-        	log "Error : CFG backup failed !"
-		let NB_ERRORS++
-        fi
+	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null &	
+	PROCINFO[0,pid]=$!
+	PROCINFO[0,name]="config"
+	DIRECTORIES[0]=${PROCINFO[$i,name]}
+	PIDS="$PIDS ${PROCINFO[0,pid]}"
+	let COUNT_PROC++
+
 	if [ "$NB_SHARD" -ne "0" ] ; then 
 		i=1
 		for SHARD in ${SHARD_HOSTS[@]} ; do 
+			if [[ "$COUNT_PROC" -eq "$MAX_PROC" ]] ; then
+				log "Info: Max backup processus exceeded, waiting..."
+				waitChildProcess $PIDS
+				PIDS=""
+			fi
+
 			isMaster=$(check_is_master $SHARD)
 			if [ "$isMaster" == "true" ] ; then
 				log "${SHARD} is master of replicaSet. Pickup a slave host..."
 				SHARD=$(pickup_secondary $SHARD)
 				log "${SHARD} has been selected."
 			fi
-			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null ; SHARD_RETURN=$?	
-			DIRECTORIES[$i]=$(eval "echo \$SHARD${i}_NAME")
-			if [ "$SHARD_RETURN" -ne "0" ] ; then
-				log "Error : ${SHARD} backup failed !"
-				let NB_ERRORS++
-			fi
-			let i++
+			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null &	
+			PROCINFO[$i,pid]=$!
+			PROCINFO[$i,name]=$(eval "echo \$SHARD${i}_NAME")
+			DIRECTORIES[$i]=${PROCINFO[$i,name]}
+			PIDS="$PIDS ${PROCINFO[$i,pid]}"
+			(( i++, COUNT_PROC++ ))
 		done
 	fi
+
+	log "Info: Waiting for ending jobs..."
+	waitChildProcess $PIDS
 	log "Info: Backups are finished"
+
 	start_balancer
 	finish_up
 fi
