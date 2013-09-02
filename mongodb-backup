@@ -193,7 +193,7 @@ function do_tarball {
 	nbLogNotCompressed=$(find . -name "*.log" -type f -mtime +0 | wc -l)
 	if [ "$nbLogNotCompressed" != "0" ] ; then 
 		for logFile in $(find . -name "*.log" -type f -mtime +0) ; do
-			tar -czf $logFile.tar.gz $logFile --remove-files
+			gzip $logFile
 		done
 	fi
 
@@ -201,17 +201,21 @@ function do_tarball {
 }
 
 function retention {
-	sType=$1
-	sDir=$2
+	local sType=$1 sDir=$2
 
-	eval "echo \$SHARD${i}_NAME"
+	if [[ "$sType" == "backup" ]]; then
+		sExt="tar.gz"
+	else
+		sExt=".gz"
+	fi
+
 	if [ "$(eval "echo \$MAX_${sType^^}_RETENTION")" -gt 0 ] ; then
 		log "Checking $sType retention..."
-		toDelete=$(find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION"))
+		toDelete=$(find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION"))
 		if [ ! -z "$toDelete" ] ; then
 			log "Deleting files older than $(eval "echo \$MAX_${sType^^}_RETENTION") days:"
-			log "$(find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -exec du -hs {} \;)" 
-			find $sDir -name "*.tar.gz" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -delete
+			log "$(find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -exec du -hs {} \;)" 
+			find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -delete
 		fi
 	else
 		log "Info : ${sType^} retention is disable."
@@ -436,7 +440,7 @@ else
 	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null &	
 	PROCINFO[0,pid]=$!
 	PROCINFO[0,name]="config"
-	DIRECTORIES[0]=${PROCINFO[$i,name]}
+	DIRECTORIES[0]=${PROCINFO[0,name]}
 	PIDS="$PIDS ${PROCINFO[0,pid]}"
 	let COUNT_PROC++
 
