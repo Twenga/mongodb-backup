@@ -35,8 +35,12 @@ DUMP_OPTIONS=""
 OPTIONS=""
 NB_ERRORS=0
 NB_FILE=0
+COUNT_PROC=0
 declare -a PIDS
 declare -A PROCINFO
+
+## Activate job monitoring
+set -o monitor
 
 ## Check if mongo binary is present
 which mongo &> /dev/null ; isInstalled=$?
@@ -277,7 +281,7 @@ function findInArray {
 # this allow to handle timeout
 function timedWait {
 	sleep $BACKUP_TIMEOUT &
-	iSleeppId=$!
+	iSleepPid=$!
 	wait $! >/dev/null 2>&1
 }
 
@@ -306,9 +310,10 @@ function waitChildProcess {
 			# use wait to get back the return code of the child
 			elif wait "$iPid" 2>/dev/null; then
 				log "Info: $sName backup completed"
+				let COUNT_PROC--
 			else
 				log "Error: $sName backup failed"
-				let NB_ERRORS++
+				(( NB_ERRORS++, COUNT_PROC--))
 			fi
 		done
 
@@ -376,6 +381,10 @@ if [ "$COMPRESS_LVL" != "normal" ] && [ "$COMPRESS_LVL" != "fast" ] && [ "$COMPR
 	exit 1
 fi
 
+# this allow to send signal SIGCHLD on child crash/exit
+trap "childExit" CHLD
+# Kill all child process if ctrl-c
+trap "killAllChilds $PIDS" SIGINT SIGTERM
 
 ###########################################################################
 #                                   BEGIN                                 #
@@ -400,14 +409,24 @@ else
 	log "MongoDB backup start at $(date +%H:%M:%S)"
 	prepare_job
 	stop_balancer
+
 	log "Starting backups..."
 	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null &	
 	PROCINFO[0,pid]=$!
 	PROCINFO[0,name]="config"
+	DIRECTORIES[0]=${PROCINFO[$i,name]}
+	PIDS="$PIDS ${PROCINFO[0,pid]}"
+	let COUNT_PROC++
 
 	if [ "$NB_SHARD" -ne "0" ] ; then 
 		i=1
 		for SHARD in ${SHARD_HOSTS[@]} ; do 
+			if [[ "$COUNT_PROC" -eq "$MAX_PROC" ]] ; then
+				log "Info: Max backup processus exceeded, waiting..."
+				waitChildProcess $PIDS
+				PIDS=""
+			fi
+
 			isMaster=$(check_is_master $SHARD)
 			if [ "$isMaster" == "true" ] ; then
 				log "${SHARD} is master of replicaSet. Pickup a slave host..."
@@ -417,19 +436,11 @@ else
 			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null &	
 			PROCINFO[$i,pid]=$!
 			PROCINFO[$i,name]=$(eval "echo \$SHARD${i}_NAME")
-			let i++
+			DIRECTORIES[$i]=${PROCINFO[$i,name]}
+			PIDS="$PIDS ${PROCINFO[$i,pid]}"
+			(( i++, COUNT_PROC++ ))
 		done
 	fi
-
-	for (( i=0; i<$(( ${#PROCINFO[@]}/2 )); i++ )) ; do
-		PIDS="$PIDS ${PROCINFO[$i,pid]}"
-		DIRECTORIES[$i]=${PROCINFO[$i,name]}
-	done
-
-	# activate job monitoring
-	# this allow to send signal SIGCHLD on child crash/exit
-	set -o monitor
-	trap "childExit" CHLD
 
 	log "Info: Waiting for ending jobs..."
 	waitChildProcess $PIDS
