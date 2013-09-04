@@ -256,15 +256,15 @@ function send_mail {
 function stop_balancer {
 	log "Stopping MongoDB balancer..."
 	if [ ! -f "$STOP_BALANCER_JS" ] ; then
-        	log "Error : ${STOP_BALANCER_JS} dosn't exists !"
-        	log "Error : Balancer hasn't been stopped"
+		log "Error : ${STOP_BALANCER_JS} doesn't exist !"
+		log "Error : Balancer hasn't been stopped."
 		let NB_ERRORS++
       	else
 		balancerState=$(get_balancer_state)
         	if [ "$balancerState" == "true" ] ; then
             		mongo $MONGOS_OPT config $STOP_BALANCER_JS >> $LOG_FILE
          	else
-			log "Warning : Balancer is already shutdown !"
+			log "Warning : Balancer is already stopped !"
 			let NB_ERRORS++
 		fi
 	fi
@@ -278,12 +278,12 @@ function start_balancer {
 		sleep 10
 		balancerState=$(get_balancer_state)
 		if [ "$balancerState" == "false" ] ; then
-			log "Error :: I couldn't start the balancer"
+			log "Error :: Couldn't start the balancer"
 			log "Error :: Please check manually !!"
 			let NB_ERRORS++
 		fi
         else
-		log "Warning : Balancer is already running"
+		log "Warning : Balancer is already running."
 		let NB_ERRORS++
 	fi
 }
@@ -419,7 +419,7 @@ trap "killAllChilds $PIDS" SIGINT SIGTERM
 check_running ; isRunning=$?  
 
 if [ "$isRunning" -eq 0 ] ; then
-	log "MongoDB backup is already running"
+	log "MongoDB backup is already running."
 	exit
 else
 	echo "$$" > $PID_FILE
@@ -432,7 +432,7 @@ else
         fi
 
 	echo "--------------------------------------------------------------------------------" > $LOG_FILE
-	log "MongoDB backup start at $(date +%H:%M:%S)"
+	log "MongoDB backup started at $(date +%H:%M:%S)"
 	prepare_job
 	stop_balancer
 
@@ -455,7 +455,7 @@ else
 
 			isMaster=$(check_is_master $SHARD)
 			if [ "$isMaster" == "true" ] ; then
-				log "${SHARD} is master of replicaSet. Pickup a slave host..."
+				log "${SHARD} is master of replicaSet. Picking a slave host..."
 				SHARD=$(pickup_secondary $SHARD)
 				log "${SHARD} has been selected."
 			fi
@@ -470,7 +470,7 @@ else
 
 	log "Info: Waiting for ending jobs..."
 	waitChildProcess $PIDS
-	log "Info: Backups are finished"
+	log "Info: Backups completed."
 
 	start_balancer
 	finish_up
