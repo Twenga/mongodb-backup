@@ -494,6 +494,9 @@ else
 		done
 	fi
 
+	# Allow to ease the CPU and let system to consider properly the ongoing process 
+	sleep ${WAITALL_DELAY:-1}
+
 	log "Info: Waiting for ending jobs..."
 	waitChildProcess $PIDS
 	log "Info: Backups completed."
