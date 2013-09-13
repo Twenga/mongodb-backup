@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 #  mongodb-backup is a backup script for MongoDB database
-#  Version : 0.2
+#  Version : 0.3.0
 #
 #  Apache License, Version 2.0
 #
