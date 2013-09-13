@@ -113,7 +113,7 @@ function isMaster {
 function pickingSecondary {
 	local sSlaves sSlave
 	sSlaves=$(mongo --host $1 --eval "printjson(rs.status())" | grep -B3 SECONDARY | grep name | sed 's/[\t",]//g' | awk '{print $3}')
-	sSlave=$(shuf -e $slaves -n 1)
+	sSlave=$(shuf -e $sSlaves -n 1)
 	echo $sSlave
 }
 
