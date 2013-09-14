@@ -1,4 +1,4 @@
-# MongoDB Backup -- version 0.2
+# MongoDB Backup -- version 0.3.0
 
 Shell script to backup MongoDB databases.
 Use mongodump command to make a hot backup of your environment.
@@ -8,6 +8,7 @@ Initially, it was designed to backup all databases on replicatSet and sharded en
 ## Functionnality
 
    * Stop Balancer (to prevent chunks migration during backup)
+   * Multithreading dump
    * Compression
       * perform gzip compression
       * choose compression level (fast, normal, best)
@@ -30,6 +31,8 @@ $ git clone https://github.com/Twenga/mongodb-backup.git
 $ cd mongodb-backup
 $ ./install.sh
 ```
+If /etc/mongodb-backup.conf already exists on your system, please check changes on /etc/mongodb-backup.conf.dist and adapt them according to your needs. 
+
 
 ## Default paramaters
 
