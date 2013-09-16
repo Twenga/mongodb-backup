@@ -111,9 +111,16 @@ function isMaster {
 
 ## Pick a secondary host of replica set
 function pickingSecondary {
-	local sSlaves sSlave
-	sSlaves=$(mongo --host $1 --eval "printjson(rs.status())" | grep -B3 SECONDARY | grep name | sed 's/[\t",]//g' | awk '{print $3}')
-	sSlave=$(shuf -e $sSlaves -n 1)
+	local countMemberInRS sSlaves sSlave sHost=$1
+
+	# Test if the server passed in parameter is alone in replicaSet. If yes return this server
+	countMemberInRS=( $(mongo --host $sHost --eval "printjson(rs.isMaster().hosts)" | tail -1 | tr -d "\",[]") )
+	if [[ ${#countMemberInRS[@]} != "1" ]] ; then
+		sSlaves=$(mongo --host $sHost --eval "printjson(rs.status())" | grep -B3 SECONDARY | grep name | sed 's/[\t",]//g' | awk '{print $3}')
+		sSlave=$(shuf -e $sSlaves -n 1)
+	else
+		sSlave=$sHost
+	fi
 	echo $sSlave
 }
 
@@ -479,11 +486,12 @@ else
 				PIDS=""
 			fi
 
+			sTmp=$SHARD
 			bIsMaster=$(isMaster $SHARD)
 			if [ "$bIsMaster" == "true" ] ; then
 				log "${SHARD} is master of replicaSet. Picking a slave host..."
 				SHARD=$(pickingSecondary $SHARD)
-				log "${SHARD} has been selected."
+				[[ "$sTmp" == "$SHARD" ]] && log "${SHARD} is alone in replicaSet. Selects it anyway." || log "${SHARD} has been selected."
 			fi
 			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null &	
 			PROCINFO[$i,pid]=$!
