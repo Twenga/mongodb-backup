@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 #  mongodb-backup is a backup script for MongoDB database
-#  Version : 0.2
+#  Version : 0.3.0
 #
 #  Apache License, Version 2.0
 #
@@ -35,11 +35,17 @@ DUMP_OPTIONS=""
 OPTIONS=""
 NB_ERRORS=0
 NB_FILE=0
+COUNT_PROC=0
+declare -a PIDS
+declare -A PROCINFO
+
+## Activate job monitoring
+set -o monitor
 
 ## Check if mongo binary is present
-which mongo &> /dev/null ; isInstalled=$?
+which mongo &> /dev/null ; iIsInstalled=$?
 
-if [ "$isInstalled" == 1 ] ; then
+if [ "$iIsInstalled" == 1 ] ; then
 	echo -e "\nCan't find mongodb client... aborting!"
 	exit 1
 fi
@@ -60,6 +66,7 @@ LOG_FILE="${LOGS_DIR}/mongodb-backup_${DATE}.log"
 #                                Functions                                #
 ###########################################################################
 
+## Usage function
 function usage() {
 	echo -e "Usage: $PROGNAME [options] ...\n"
         echo "Options are..."
@@ -72,6 +79,7 @@ function usage() {
 	echo -e "   -p <password>"
 }
 
+## Log events to log file and to stdout
 function log {
 	echo -e "$(date +%D" "%T) $1" >> $LOG_FILE
 	if [ "$DISPLAY_ERRORS" ] ; then
@@ -79,34 +87,42 @@ function log {
 	fi       
 }
 
-function check_running {
+## Check if a backup is runnning 
+function isRunning {
+	local iIsRunning
 	if [ -f $PID_FILE ] ; then
 		PID=$(cat $PID_FILE)
-		ps -A | grep $PID &> /dev/null ; isRunning=$?
-		if [ "$isRunning" -eq "0" ] ; then
+		ps -A | grep $PID &> /dev/null ; iIsRunning=$?
+		if [ "$iIsRunning" -eq "0" ] ; then
 			return 0
 		else
 			rm -f $PID_FILE
 		fi
 	fi
-	
 	return 1
 }
 
-function check_is_master {
-	isMaster=$(mongo --host $1 --eval "printjson(rs.isMaster())" | grep ismaster | sed 's/[\t",]//g' | awk '{print $3}') 
-	echo $isMaster
+## Check if host is master of replica set
+function isMaster {
+	local bIsMaster
+	bIsMaster=$(mongo --host $1 --eval "printjson(rs.isMaster())" | grep ismaster | sed 's/[\t",]//g' | awk '{print $3}') 
+	echo $bIsMaster
 }
 
-function pickup_secondary {
-	slaves=$(mongo --host $1 --eval "printjson(rs.status())" | grep -B3 SECONDARY | grep name | sed 's/[\t",]//g' | awk '{print $3}')
-	slave=$(shuf -e $slaves -n 1)
-	echo $slave
+## Pick a secondary host of replica set
+function pickingSecondary {
+	local sSlaves sSlave
+	sSlaves=$(mongo --host $1 --eval "printjson(rs.status())" | grep -B3 SECONDARY | grep name | sed 's/[\t",]//g' | awk '{print $3}')
+	sSlave=$(shuf -e $sSlaves -n 1)
+	echo $sSlave
 }
 
-function prepare_job {
+## get script options to prepare command parameters
+function prepareJob {
+	local iTryConnection
 	log "Preparing mongodb backup job..."
 
+	# Compression level selection
 	case "${COMPRESS_LVL}" in
 		fast)   log "Info : Fast comppression was chosen"
 			COMPRESS_LVL="-1"
@@ -127,18 +143,19 @@ function prepare_job {
 		OPTIONS="${OPTIONS} --username=$USERNAME --password=$PASSWORD"
 	fi
 
+	# Set host parameter if host is different of localhost
         if [ "$MONGOS_HOST" != "localhost" ] ; then
 		MONGOS_OPT="${OPTIONS} --host ${MONGOS_HOST}"
 	fi
 
 	# Try to connect
-	mongo $MONGOS_OPT --eval "printjson()" &> /dev/null ; tryConnection=$?
-	if [ "$tryConnection" -eq 1 ] ; then
+	mongo $MONGOS_OPT --eval "printjson()" &> /dev/null ; iTryConnection=$?
+	if [ "$iTryConnection" -eq 1 ] ; then
 		log "Critical: Unable to connect on ${MONGOS_HOST}. Please check if mongos is running or check 'MONGOS_HOST' option in /etc/mongodb-backup.conf"
 		exit 1
 	fi
 
-
+	# Check if SHARD options is correct
 	if [ "$NB_SHARD" -ne 0 ] ; then
 		for (( n=1; n<=$NB_SHARD; n++ )) ; do
 			SHARD_HOSTS[$n]=$(eval "echo \$SHARD${n}_HOST")
@@ -154,21 +171,25 @@ function prepare_job {
 	fi
 }
 
-function finish_up {
-	do_tarball
+## Last actions of script
+function finishUp {
+	doCompress
 	END_TIME=$(date +%s)
 	TIME_DIFF=$(( $END_TIME - $START_TIME ))
 	TIME_DIFF=`echo $(($TIME_DIFF / 60 ))`
 	log "Finished MongoDB backup in $TIME_DIFF minutes..."
-	send_mail
+	sendMail
 	rm -f $PID_FILE >> $LOG_FILE
 	exit 0
 }
 
-function do_tarball {
+## Compress backups and log files
+function doCompress {
+	local i=0
 	log "Starting compression..."
+
+	# Compress backups
 	cd $BACKUP_DIR
-	i=0
 	for DIR in ${DIRECTORIES[@]} ; do
 		if [ -d "$DIR" ] ; then
 			FILES[$i]=$(tar -cf - $DIR | gzip ${COMPRESS_LVL} - > ${DIR}_${DATE}.tar.gz)
@@ -180,24 +201,55 @@ function do_tarball {
 		let i++
 	done
 	NB_FILE=${#FILES[@]} 
-	check_retention
+
+	# Compress logs
+	cd $BACKUP_DIR/logs
+	iNbLogsNotCompressed=$(find . -name "*.log" -type f -mtime +0 | wc -l)
+	if [ "$iNbLogsNotCompressed" != "0" ] ; then 
+		for logFile in $(find . -name "*.log" -type f -mtime +0) ; do
+			gzip $logFile
+		done
+	fi
+
+	checkRetention
 }
 
-function check_retention {
-	if [ $MAX_BACKUP_RETENTION -gt 0 ] ; then
-    		log "Checking retention of backups..."
-    		toDelete=$(find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION)
-      		if [ ! -z "$toDelete" ] ; then
-        		log "Deleting files older than ${MAX_BACKUP_RETENTION} days:"
-			log "$(find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION -exec du -hs {} \;)" 
-       			find $BACKUP_DIR -name "*.tar.gz" -type f -mtime +$MAX_BACKUP_RETENTION -delete
-      		fi
+## Apply retention
+function retention {
+	local sType=$1 sDir=$2
+
+	if [[ "$sType" == "backup" ]]; then
+		sExt="tar.gz"
 	else
-		log "Info : Retention is disable."
+		sExt=".gz"
+	fi
+
+	if [ "$(eval "echo \$MAX_${sType^^}_RETENTION")" -gt 0 ] ; then
+		log "Checking $sType retention..."
+		toDelete=$(find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION"))
+		if [ ! -z "$toDelete" ] ; then
+			log "Deleting files older than $(eval "echo \$MAX_${sType^^}_RETENTION") days:"
+			log "$(find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -exec du -hs {} \;)" 
+			find $sDir -name "*.$sExt" -type f -mtime +$(eval "echo \$MAX_${sType^^}_RETENTION") -delete
+		fi
+	else
+		log "Info : ${sType^} retention is disable."
 	fi
 }
 
-function send_mail {
+## Check retention by type
+function checkRetention {
+	# Check backup retention
+	retention backup $BACKUP_DIR
+
+	# Check logs retention
+	retention log $BACKUP_DIR/logs
+}
+
+## eMail reporting
+function sendMail {
+	local sizeOfBackupDir sizeOfBackup
+
 	if [ "$REPORT_EMAIL" ] && [ -n ${REPORT_EMAIL+x}  ] ; then
 		log "Sending email notifications..."
 	    	echo "Backup time: $TIME_DIFF minutes" > /tmp/$PROGNAME_mail.tmp
@@ -220,49 +272,127 @@ function send_mail {
 	fi
 }
 
-function stop_balancer {
+## Stop balancer to prevent chunk migration during backup
+function stopBalancer {
+	local bBalancerState
+
 	log "Stopping MongoDB balancer..."
 	if [ ! -f "$STOP_BALANCER_JS" ] ; then
-        	log "Error : ${STOP_BALANCER_JS} dosn't exists !"
-        	log "Error : Balancer hasn't been stopped"
+		log "Error : ${STOP_BALANCER_JS} doesn't exist !"
+		log "Error : Balancer hasn't been stopped."
 		let NB_ERRORS++
       	else
-		balancerState=$(get_balancer_state)
-        	if [ "$balancerState" == "true" ] ; then
+		bBalancerState=$(getBalancerState)
+		if [ "$bBalancerState" == "true" ] ; then
             		mongo $MONGOS_OPT config $STOP_BALANCER_JS >> $LOG_FILE
          	else
-			log "Warning : Balancer is already shutdown !"
+			log "Warning : Balancer is already stopped !"
 			let NB_ERRORS++
 		fi
 	fi
 }
 
-function start_balancer {
+## Start balancer
+function startBalancer {
+	local bBalancerState
+
 	log "Restarting MongoDB balancer..."
-	balancerState=$(get_balancer_state)
-        if [ "$balancerState" == "false" ] ; then
+	bBalancerState=$(getBalancerState)
+        if [ "$bBalancerState" == "false" ] ; then
         	mongo $MONGOS_OPT config --eval "sh.setBalancerState(true)" &> /dev/null
 		sleep 10
-		balancerState=$(get_balancer_state)
+		bBalancerState=$(getBalancerState)
 		if [ "$balancerState" == "false" ] ; then
-			log "Error :: I couldn't start the balancer"
+			log "Error :: Couldn't start the balancer"
 			log "Error :: Please check manually !!"
 			let NB_ERRORS++
 		fi
         else
-		log "Warning : Balancer is already running"
+		log "Warning : Balancer is already running."
 		let NB_ERRORS++
 	fi
 }
 
-function get_balancer_state {
+## Get balancer status
+function getBalancerState {
 	mongo $MONGOS_OPT admin --eval "sh.getBalancerState()" | tail -1 
 }
+
+## Search in PROCINFO array
+function findInArray {
+	local sReturnType=$1 sSearch=$2
+	[[ "$sReturnType" != "pid" ]] && sSearchType="pid" || sSearchType="name" 
+	for (( i=0; i<$(( ${#PROCINFO[@]}/2 )); i++ )) ; do
+		if [ ${PROCINFO[$i,$sSearchType]} == $sSearch ] ; then
+			echo ${PROCINFO[$i,$sReturnType]}
+			return 0
+		fi
+	done
+	return 1
+}
+
+## Allow to handle timeout
+function timedWait {
+	sleep $BACKUP_TIMEOUT &
+	iSleepPid=$!
+	wait $! >/dev/null 2>&1
+}
+
+## Send SIGTERM to remaining childs
+function killAllChilds {
+	for iPid in "$@"; do
+		shift
+		log "send SIGTERM to $iPid"
+		kill -0 $iPid 2>/dev/null && kill $iPid
+	done
+}
+
+## Childs process control
+function waitChildProcess {
+	# Wait for children to exit and indicate whether all exited with 0 status.
+	# start the infinite loop
+	while :; do
+		for iPid in "$@"; do
+			shift
+			sName=$(findInArray name $iPid) 
+
+			# Test if still present
+			if kill -0 "$iPid" 2>/dev/null; then
+				# still present, remove the pid from pid list
+				set -- "$@" "$iPid"
+			# Use wait to get back the return code of the child
+			elif wait "$iPid" 2>/dev/null; then
+				log "Info: $sName backup completed"
+				let COUNT_PROC--
+			else
+				log "Error: $sName backup failed"
+				(( NB_ERRORS++, COUNT_PROC--))
+			fi
+		done
+
+		# Exit when no child remains
+		(("$#" > 0)) || break
+
+		timedWait
+		if [ $? -eq 0 ]; then
+			# Timeout reached
+			log "Timeout... killing remaining child."
+			killAllChilds $@
+		fi
+	done
+}
+
+## Called when a child exits (trap)
+function childExit {
+	kill -0 $iSleepPid 2>/dev/null && kill $iSleepPid
+}
+
 
 ###########################################################################
 #                              Options checks                             #
 ###########################################################################
 
+## Get options
 while getopts ":hjerm:c:u:p:" opt ; do
         case "$opt" in
 		h) usage >&2 ; exit 0;;
@@ -285,7 +415,7 @@ while getopts ":hjerm:c:u:p:" opt ; do
 	esac
 done
 
-## Check email 
+## Check if eMail is valid 
 if [ "$REPORT_EMAIL" ] && [ -n ${REPORT_EMAIL+x} ] ; then
 	CHECK_EMAIL=$(echo $REPORT_EMAIL | egrep "^(([-a-zA-Z0-9\!#\$%\&\'*+/=?^_\`{\|}~])+\.)*[-a-zA-Z0-9\!#\$%\&\'*+/=?^_\`{\|}~]+@\w((-|\w)*\w)*\.(\w((-|\w)*\w)*\.)*\w{2,4}$")
 	if [ "x$CHECK_EMAIL" = "x" ]; then 
@@ -295,7 +425,7 @@ if [ "$REPORT_EMAIL" ] && [ -n ${REPORT_EMAIL+x} ] ; then
 	fi	
 fi
 
-## Check compression lvl
+## Check if compression level is correct
 if [ "$COMPRESS_LVL" != "normal" ] && [ "$COMPRESS_LVL" != "fast" ] && [ "$COMPRESS_LVL" != "best" ] ; then
 	echo -e "\nBad compression level... what did you do ?!"
 	echo "Valid values: fast, normal or best"
@@ -303,15 +433,19 @@ if [ "$COMPRESS_LVL" != "normal" ] && [ "$COMPRESS_LVL" != "fast" ] && [ "$COMPR
 	exit 1
 fi
 
+# Execute childExit function if child process crash/exit
+trap "childExit" CHLD
+# Kill all child process if ctrl-c
+trap "killAllChilds $PIDS" SIGINT SIGTERM
 
 ###########################################################################
 #                                   BEGIN                                 #
 ###########################################################################
 
-check_running ; isRunning=$?  
+isRunning ; iIsRunning=$?
 
-if [ "$isRunning" -eq 0 ] ; then
-	log "MongoDB backup is already running"
+if [ "$iIsRunning" -eq 0 ] ; then
+	log "MongoDB backup is already running."
 	exit
 else
 	echo "$$" > $PID_FILE
@@ -324,35 +458,49 @@ else
         fi
 
 	echo "--------------------------------------------------------------------------------" > $LOG_FILE
-	log "MongoDB backup start at $(date +%H:%M:%S)"
-	prepare_job
-	stop_balancer
+	log "MongoDB backup started at $(date +%H:%M:%S)"
+	prepareJob
+	stopBalancer
+
 	log "Starting backups..."
-	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null ; CFG_RETURN=$?	
-	DIRECTORIES[0]="config" 
-	if [ "$CFG_RETURN" -ne "0" ] ; then
-        	log "Error : CFG backup failed !"
-		let NB_ERRORS++
-        fi
+	mongodump $MONGOS_OPT $DUMP_OPTIONS --db config --out $BACKUP_DIR/config &> /dev/null &	
+	PROCINFO[0,pid]=$!
+	PROCINFO[0,name]="config"
+	DIRECTORIES[0]=${PROCINFO[0,name]}
+	PIDS="$PIDS ${PROCINFO[0,pid]}"
+	let COUNT_PROC++
+
 	if [ "$NB_SHARD" -ne "0" ] ; then 
 		i=1
 		for SHARD in ${SHARD_HOSTS[@]} ; do 
-			isMaster=$(check_is_master $SHARD)
-			if [ "$isMaster" == "true" ] ; then
-				log "${SHARD} is master of replicaSet. Pickup a slave host..."
-				SHARD=$(pickup_secondary $SHARD)
+			if [[ "$COUNT_PROC" -eq "$MAX_PROC" ]] ; then
+				log "Info: Max backup processus exceeded, waiting..."
+				waitChildProcess $PIDS
+				PIDS=""
+			fi
+
+			bIsMaster=$(isMaster $SHARD)
+			if [ "$bIsMaster" == "true" ] ; then
+				log "${SHARD} is master of replicaSet. Picking a slave host..."
+				SHARD=$(pickingSecondary $SHARD)
 				log "${SHARD} has been selected."
 			fi
-			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null ; SHARD_RETURN=$?	
-			DIRECTORIES[$i]=$(eval "echo \$SHARD${i}_NAME")
-			if [ "$SHARD_RETURN" -ne "0" ] ; then
-				log "Error : ${SHARD} backup failed !"
-				let NB_ERRORS++
-			fi
-			let i++
+			mongodump --host $SHARD $OPTIONS $DUMP_OPTIONS --oplog --out $BACKUP_DIR/$(eval "echo \$SHARD${i}_NAME") &> /dev/null &	
+			PROCINFO[$i,pid]=$!
+			PROCINFO[$i,name]=$(eval "echo \$SHARD${i}_NAME")
+			DIRECTORIES[$i]=${PROCINFO[$i,name]}
+			PIDS="$PIDS ${PROCINFO[$i,pid]}"
+			(( i++, COUNT_PROC++ ))
 		done
 	fi
-	log "Info: Backups are finished"
-	start_balancer
-	finish_up
+
+	# Allow to ease the CPU and let system to consider properly the ongoing process 
+	sleep ${WAITALL_DELAY:-1}
+
+	log "Info: Waiting for ending jobs..."
+	waitChildProcess $PIDS
+	log "Info: Backups completed."
+
+	startBalancer
+	finishUp
 fi

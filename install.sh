@@ -13,9 +13,15 @@ TARGET_LIB="/usr/local/lib"
 # Dispatch files
 cp -f $PROGRAM $TARGET_BIN/ 
 cp -f $STOP_BALANCER_JS $TARGET_LIB/
-cp -f $CONF /etc/
 
-if [ -f "$TARGET_BIN/$PROGRAM" ] && [ -f "$TARGET_LIB/$STOP_BALANCER_JS" ] && [ -f "$CONF" ]; then
+if [ -f "/etc/$CONF" ]; then
+	cp -f $CONF /etc/$CONF.dist
+	echo "/etc/$CONF already exists. Please sure to read the /etc/$CONF.dist and adapt changes according to your needs."
+else
+	cp -f $CONF /etc/
+fi
+
+if [ -f "$TARGET_BIN/$PROGRAM" ] && [ -f "$TARGET_LIB/$STOP_BALANCER_JS" ] && [ -f "/etc/$CONF" ]; then
 	echo "Done."
 else
 	echo "Installation failed"
