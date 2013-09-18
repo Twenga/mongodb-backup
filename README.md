@@ -1,4 +1,4 @@
-# MongoDB Backup -- version 0.3.0
+# MongoDB Backup -- version 0.3.1
 
 Shell script to backup MongoDB databases.
 Use mongodump command to make a hot backup of your environment.
