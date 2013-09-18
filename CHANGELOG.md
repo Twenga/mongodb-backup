@@ -1,4 +1,7 @@
 # Changelog
+## v0.3.1 - 16/09/2013
+   * Fix picking secondary function when a server is alone in replicatSet
+
 ## v0.3.0 - 13/09/2013
    * Multithreading dump
    * Log retention
